@@ -18,7 +18,6 @@ import time
 import argparse
 import requests
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from simple_term_menu import TerminalMenu
@@ -32,8 +31,6 @@ HEADERS = {
 DELAY = 0.5
 DEFAULT_DURATION_MIN = 90
 BUFFER_MIN = 15
-TZ_MUNICH = ZoneInfo("Europe/Berlin")
-TZ_UTC = ZoneInfo("UTC")
 
 
 # ───────────────────────── parsing ─────────────────────────
@@ -55,6 +52,13 @@ def parse(html):
     title = h1.get_text(strip=True) if h1 else "(unknown)"
     h2 = soup.find("h2")
     duration = parse_duration_from_h2(h2.get_text(" ", strip=True)) if h2 else None
+
+    # Check for "#Nur im Kino" tag (German for "Only in cinemas")
+    cinema_only = False
+    for tag in soup.select('a[href*="films_tag"]'):
+        if "nur im kino" in tag.get_text().lower():
+            cinema_only = True
+            break
 
     rows = []
     seen = set()
@@ -85,6 +89,7 @@ def parse(html):
             "ics":            ics_url,
             "comment":        comment,
             "start":          parse_datetime(date_str, time_str),
+            "cinema_only":    cinema_only,
         })
     return rows
 
@@ -173,15 +178,22 @@ def interactive_resolve(by_film, initial_picked, names):
         n_scheduled = len(picked)
         n_total = len(names) - len(excluded)
 
+        # Check cinema_only status for both films
+        unpicked_cinema = any(s.get("cinema_only") for s in by_film.get(unpicked_film, []))
+        blocking_cinema = any(s.get("cinema_only") for s in by_film.get(blocking_film, []))
+
+        unpicked_tag = " #NurImKino" if unpicked_cinema else ""
+        blocking_tag = " #NurImKino" if blocking_cinema else ""
+
         print(f"\n{'─' * 60}", file=sys.stderr)
         print(f"  Schedule: {n_scheduled} of {n_total} films", file=sys.stderr)
-        print(f"  \"{unpicked_film}\" cannot be scheduled.", file=sys.stderr)
-        print(f"  It conflicts with \"{blocking_film}\" (currently scheduled).", file=sys.stderr)
+        print(f"  \"{unpicked_film}\"{unpicked_tag} cannot be scheduled.", file=sys.stderr)
+        print(f"  It conflicts with \"{blocking_film}\"{blocking_tag} (currently scheduled).", file=sys.stderr)
         print(f"{'─' * 60}\n", file=sys.stderr)
 
         options = [
-            f"Keep \"{blocking_film}\" — skip \"{unpicked_film}\"",
-            f"Keep \"{unpicked_film}\" — remove \"{blocking_film}\"",
+            f"Keep \"{blocking_film}\"{blocking_tag} — skip \"{unpicked_film}\"",
+            f"Keep \"{unpicked_film}\"{unpicked_tag} — remove \"{blocking_film}\"",
             "Accept current schedule",
         ]
 
@@ -248,57 +260,39 @@ def format_schedule(picked, all_film_names):
 
 # ───────────────────────── ICS output ─────────────────────────
 
-def ics_escape(s):
-    return (s.replace("\\", "\\\\")
-             .replace(",", "\\,")
-             .replace(";", "\\;")
-             .replace("\n", "\\n"))
-
-def ics_fold(line, limit=73):
-    encoded = line.encode("utf-8")
-    if len(encoded) <= limit:
-        return line
-    parts = []
-    while len(encoded) > limit:
-        cut = limit
-        while cut > 0 and (encoded[cut] & 0xC0) == 0x80:
-            cut -= 1
-        parts.append(encoded[:cut].decode("utf-8"))
-        encoded = encoded[cut:]
-    parts.append(encoded.decode("utf-8"))
-    return "\r\n ".join(parts)
+def extract_vevent(ics_text):
+    """Extract VEVENT block from an ICS file."""
+    start = ics_text.find("BEGIN:VEVENT")
+    end = ics_text.find("END:VEVENT")
+    if start == -1 or end == -1:
+        return None
+    return ics_text[start:end + len("END:VEVENT")]
 
 def write_ics(picked, path):
-    now_stamp = datetime.now(tz=TZ_UTC).strftime("%Y%m%dT%H%M%SZ")
-    lines = [
-        "BEGIN:VCALENDAR",
-        "VERSION:2.0",
-        "PRODID:-//dokfest-planner//scrape_screenings//EN",
-        "CALSCALE:GREGORIAN",
-        "METHOD:PUBLISH",
-    ]
+    """Fetch official ICS files and merge them into one calendar."""
+    vevents = []
     for s in sorted(picked, key=lambda x: x["start"]):
-        start_utc = s["start"].replace(tzinfo=TZ_MUNICH).astimezone(TZ_UTC)
-        end_utc   = start_utc + timedelta(minutes=s["duration"])
-        uid = s["ics"].rsplit("/", 1)[-1] + "@dokfest-planner"
-        desc = f"Länge: {s['duration']} min"
-        if s.get("comment"):
-            desc += f"\n{s['comment']}"
-        desc += f"\nSource: {s['ics']}"
-        lines.extend([
-            "BEGIN:VEVENT",
-            ics_fold(f"UID:{uid}"),
-            f"DTSTAMP:{now_stamp}",
-            f"DTSTART:{start_utc.strftime('%Y%m%dT%H%M%SZ')}",
-            f"DTEND:{end_utc.strftime('%Y%m%dT%H%M%SZ')}",
-            ics_fold(f"SUMMARY:{ics_escape(s['film'])}"),
-            ics_fold(f"LOCATION:{ics_escape(s['venue'])}"),
-            ics_fold(f"DESCRIPTION:{ics_escape(desc)}"),
-            "END:VEVENT",
-        ])
-    lines.append("END:VCALENDAR")
+        try:
+            ics_text = fetch(s["ics"])
+            vevent = extract_vevent(ics_text)
+            if vevent:
+                vevents.append(vevent)
+        except Exception as e:
+            print(f"  ! ICS fetch error for {s['film']}: {e}", file=sys.stderr)
+
+    content = "BEGIN:VCALENDAR\r\n"
+    content += "VERSION:2.0\r\n"
+    content += "PRODID:-//dokfest-planner//merged//EN\r\n"
+    content += "CALSCALE:GREGORIAN\r\n"
+    content += "METHOD:PUBLISH\r\n"
+    for vevent in vevents:
+        # Normalize line endings
+        vevent = vevent.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n")
+        content += vevent + "\r\n"
+    content += "END:VCALENDAR\r\n"
+
     with open(path, "w", encoding="utf-8", newline="") as f:
-        f.write("\r\n".join(lines) + "\r\n")
+        f.write(content)
 
 
 # ───────────────────────── main ─────────────────────────

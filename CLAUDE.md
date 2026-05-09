@@ -14,8 +14,8 @@ Single-file script `scrape_screenings.py` with sections:
 
 - **Festival HTML lists screenings twice** — dedup by ICS URL, not by (date, time, venue)
 - **`requests` needs a browser User-Agent** — the `HEADERS` constant provides one
-- **Festival times are Munich local** — ICS output converts to UTC
-- **Stable ICS UIDs** — derived from festival's `/ics/view/<N>` endpoint ID
+- **ICS files are fetched from the festival** — we merge official `/ics/view/<N>` files, not generate our own
+- **#NurImKino tag** — films with `a[href*="films_tag"]` containing "nur im kino" are marked; shown during conflict resolution to help prioritize cinema-only films
 
 ## Usage
 
