@@ -34,14 +34,13 @@ pip install -r requirements.txt
 ./scrape_screenings.py --schedule --ics schedule.ics < urls.txt > schedule.md
 ```
 
-If `ortools` fails to install or import on your machine, the script automatically falls back to a pure-Python backtracking solver (slower on hard instances — see [Performance](#performance) below).
+The `ortools` package is required for scheduling. If it fails to install on your machine (common on NixOS), use the Docker path instead.
 
 ## Usage
 
 ```
 scrape_screenings.py [--schedule] [--ics PATH] [--no-table]
-                     [--buffer MINUTES] [--solver {auto,cpsat,backtrack}]
-                     [--workers N] [URL ...]
+                     [--buffer MINUTES] [--workers N] [URL ...]
 ```
 
 URLs come from positional args **or** stdin, one per line. Stdin form is preferred for 20–30 films.
@@ -52,7 +51,6 @@ URLs come from positional args **or** stdin, one per line. Stdin form is preferr
 | `--ics PATH` | write schedule as ICS calendar (requires `--schedule`) |
 | `--no-table` | skip the markdown table; useful with `--schedule --ics` |
 | `--buffer N` | minutes between screenings (default 15) — covers travel + entry |
-| `--solver` | `auto` (default), `cpsat`, or `backtrack` |
 | `--workers N` | CP-SAT search workers (default 1; rarely needed) |
 
 ### Examples
@@ -76,21 +74,12 @@ URLs come from positional args **or** stdin, one per line. Stdin form is preferr
 
 ## Performance
 
-The scheduling problem is "pick one screening per film, no time conflicts" — equivalent to a constrained max-coverage problem. With `ortools` installed (default), CP-SAT solves 30-film instances in ~20 ms. The pure-Python backtracking fallback can take seconds-to-minutes or fail to terminate on the same input.
-
-Measured on synthetic 30-film instances:
-
-| | backtracking | CP-SAT (1 worker) |
-|---|---|---|
-| typical | ~5 s | ~20 ms |
-| hard instance | timeout (>30 s) | ~20 ms |
-
-Increasing `--workers` rarely helps at this problem size — orchestration overhead dominates the gains. CP-SAT on 1 core already beats backtracking on 8 cores by orders of magnitude.
+The scheduling problem is "pick one screening per film, no time conflicts" — equivalent to a constrained max-coverage problem. CP-SAT solves 30-film instances in ~20 ms. Increasing `--workers` rarely helps at this problem size — orchestration overhead dominates the gains.
 
 ## Troubleshooting
 
 - **`ImportError: libstdc++.so.6: cannot open shared object file`** (typical on NixOS): pip-installed numpy/ortools wheels expect FHS library paths. Use Docker, or set `LD_LIBRARY_PATH=/path/to/gcc-libs/lib` (e.g. via a `shell.nix`).
-- **`✗ --solver cpsat requested but 'ortools' is not installed`**: either install ortools, or omit `--solver cpsat` to fall back to backtracking.
+- **`ModuleNotFoundError: No module named 'ortools'`**: install with `pip install ortools`, or use the Docker path.
 - **403 from the festival site**: the script sets a Chrome-on-Linux User-Agent. The default Python `requests` UA is rejected.
 - **Schedule drops films you wanted**: increase candidate screenings (more film URLs), reduce `--buffer`, or accept the dropped films — the solver returns the *optimal* maximum-coverage schedule, so dropped films genuinely don't fit.
 

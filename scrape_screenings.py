@@ -105,52 +105,7 @@ def conflicts(a, b, buffer_min=None):
     b_end = b["start"] + timedelta(minutes=b["duration"] + buffer_min)
     return a["start"] < b_end and b["start"] < a_end
 
-def find_full_schedule(by_film):
-    """Pick exactly one screening per film with no conflicts. None if impossible."""
-    films = sorted(by_film.keys(), key=lambda f: len(by_film[f]))   # most constrained first
-    def bt(i, picked):
-        if i == len(films):
-            return list(picked)
-        for s in sorted(by_film[films[i]], key=lambda x: x["start"] or datetime.max):
-            if s["start"] is None or any(conflicts(s, p) for p in picked):
-                continue
-            picked.append(s)
-            r = bt(i + 1, picked)
-            if r:
-                return r
-            picked.pop()
-        return None
-    return bt(0, [])
-
-def find_max_schedule(by_film):
-    """Find largest subset of films that can be scheduled (≤1 screening per film)."""
-    films = sorted(by_film.keys(), key=lambda f: len(by_film[f]))
-    best = []
-    def bt(i, picked):
-        nonlocal best
-        # upper-bound prune: even taking all remaining films can't beat current best
-        if len(picked) + (len(films) - i) <= len(best):
-            return
-        if i == len(films):
-            if len(picked) > len(best):
-                best = list(picked)
-            return
-        for s in sorted(by_film[films[i]], key=lambda x: x["start"] or datetime.max):
-            if s["start"] is None or any(conflicts(s, p) for p in picked):
-                continue
-            picked.append(s)
-            bt(i + 1, picked)
-            picked.pop()
-        bt(i + 1, picked)   # also try skipping this film
-    bt(0, [])
-    return best
-
-# Optional CP-SAT solver — orders of magnitude faster than backtracking on hard instances.
-try:
-    from ortools.sat.python import cp_model
-    HAVE_ORTOOLS = True
-except ImportError:
-    HAVE_ORTOOLS = False
+from ortools.sat.python import cp_model
 
 def cp_sat_schedule(by_film, workers=1):
     """
@@ -305,10 +260,7 @@ def main():
     ap.add_argument("--buffer", type=int, default=BUFFER_MIN,
                     help=f"minutes between screenings (default {BUFFER_MIN})")
     ap.add_argument("--workers", type=int, default=1,
-                    help="CP-SAT search workers (only used if ortools is installed; "
-                         "default 1 — usually plenty since it's already very fast)")
-    ap.add_argument("--solver", choices=("auto", "cpsat", "backtrack"), default="auto",
-                    help="auto picks cpsat if ortools is installed, else backtrack")
+                    help="CP-SAT search workers (default 1 — usually plenty)")
     ap.add_argument("--ics", metavar="PATH",
                     help="also write the schedule as an ICS calendar file to PATH "
                          "(requires --schedule)")
@@ -350,34 +302,15 @@ def main():
             return
         names = list(by_film.keys())
 
-        use_cpsat = (args.solver == "cpsat") or (args.solver == "auto" and HAVE_ORTOOLS)
-        if args.solver == "cpsat" and not HAVE_ORTOOLS:
-            print("✗ --solver cpsat requested but 'ortools' is not installed. "
-                  "Install with: pip install ortools", file=sys.stderr)
-            sys.exit(2)
-
-        print(f"\nScheduling {len(names)} films "
-              f"(buffer {BUFFER_MIN} min, solver={'cpsat' if use_cpsat else 'backtrack'})...",
+        print(f"\nScheduling {len(names)} films (buffer {BUFFER_MIN} min)...",
               file=sys.stderr)
 
-        if use_cpsat:
-            picked = cp_sat_schedule(by_film, workers=args.workers)
-            if len(picked) == len(names):
-                print(f"✓ Full schedule found for all {len(names)} films.", file=sys.stderr)
-            else:
-                print(f"✗ No full schedule possible. "
-                      f"Optimal max-fit: {len(picked)} of {len(names)} films.", file=sys.stderr)
+        picked = cp_sat_schedule(by_film, workers=args.workers)
+        if len(picked) == len(names):
+            print(f"✓ Full schedule found for all {len(names)} films.", file=sys.stderr)
         else:
-            full = find_full_schedule(by_film)
-            if full:
-                print(f"✓ Full schedule found for all {len(names)} films.", file=sys.stderr)
-                picked = full
-            else:
-                print("✗ No conflict-free schedule covers all films. Falling back to max-fit "
-                      "(this can be slow on hard instances; install 'ortools' for ~100–1000× speedup)...",
-                      file=sys.stderr)
-                picked = find_max_schedule(by_film)
-                print(f"  Best subset: {len(picked)} of {len(names)} films.", file=sys.stderr)
+            print(f"✗ No full schedule possible. "
+                  f"Optimal max-fit: {len(picked)} of {len(names)} films.", file=sys.stderr)
 
         print_schedule(picked, names)
 
