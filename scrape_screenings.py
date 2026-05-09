@@ -107,6 +107,13 @@ def conflicts(a, b, buffer_min=None):
 
 from ortools.sat.python import cp_model
 
+# Optional TUI for interactive conflict resolution
+try:
+    from simple_term_menu import TerminalMenu
+    HAVE_TUI = True
+except ImportError:
+    HAVE_TUI = False
+
 def cp_sat_schedule(by_film, workers=1):
     """
     Solve max-coverage scheduling with CP-SAT.
@@ -146,6 +153,116 @@ def cp_sat_schedule(by_film, workers=1):
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         return []
     return [flat[i] for i in range(len(flat)) if solver.Value(x[i])]
+
+
+def find_blocking_films(picked, by_film, excluded):
+    """
+    For each unpicked film, find which picked films block it.
+    Returns: {unpicked_film: [(picked_screening, unpicked_screening), ...]}
+    """
+    picked_films = {s["film"] for s in picked}
+    blocking = {}
+    for film, screenings in by_film.items():
+        if film in picked_films or film in excluded:
+            continue
+        blockers = []
+        for scr in screenings:
+            if scr["start"] is None:
+                continue
+            for p in picked:
+                if conflicts(scr, p):
+                    blockers.append((p, scr))
+        if blockers:
+            blocking[film] = blockers
+    return blocking
+
+
+def format_screening(s):
+    """Format a screening for display: 'Film (Day HH:MM, Venue)'"""
+    if s["start"]:
+        return f"{s['film']} ({s['start'].strftime('%a %H:%M')}, {s['venue']})"
+    return f"{s['film']} ({s['venue']})"
+
+
+def interactive_resolve(by_film, initial_picked, names, workers=1):
+    """
+    Interactive TUI loop to resolve scheduling conflicts.
+    Returns the final list of picked screenings.
+    """
+    import os
+
+    # Handle piped stdin: open /dev/tty for interactive input
+    tty_fd = None
+    if not sys.stdin.isatty():
+        try:
+            tty_fd = os.open("/dev/tty", os.O_RDONLY)
+            os.dup2(tty_fd, 0)  # redirect stdin to tty
+        except OSError:
+            print("⚠  Cannot open /dev/tty for interactive mode.", file=sys.stderr)
+            return initial_picked
+
+    picked = initial_picked
+    excluded = set()
+
+    try:
+        while len(picked) < len(names) - len(excluded):
+            blocking = find_blocking_films(picked, by_film, excluded)
+            if not blocking:
+                break
+
+            # Find the unpicked film with fewest blocking conflicts (simplest choice)
+            unpicked_film = min(blocking.keys(), key=lambda f: len(blocking[f]))
+            blockers = blocking[unpicked_film]
+
+            # Group by blocking film (a picked film may block via multiple screenings)
+            blocking_films = {}
+            for picked_scr, unpicked_scr in blockers:
+                blocking_films.setdefault(picked_scr["film"], []).append((picked_scr, unpicked_scr))
+
+            # If blocked by multiple films, pick the one with the "best" alternative
+            blocking_film = list(blocking_films.keys())[0]
+            picked_scr, unpicked_scr = blocking_films[blocking_film][0]
+
+            n_scheduled = len(picked)
+            n_total = len(names) - len(excluded)
+
+            print(f"\n{'─' * 60}", file=sys.stderr)
+            print(f"  Schedule: {n_scheduled} of {n_total} films", file=sys.stderr)
+            print(f"  \"{unpicked_film}\" cannot be scheduled.", file=sys.stderr)
+            print(f"  It conflicts with \"{blocking_film}\" (currently scheduled).", file=sys.stderr)
+            print(f"{'─' * 60}\n", file=sys.stderr)
+
+            options = [
+                f"Keep \"{blocking_film}\" — skip \"{unpicked_film}\"",
+                f"Keep \"{unpicked_film}\" — remove \"{blocking_film}\"",
+                "Accept current schedule",
+            ]
+
+            menu = TerminalMenu(
+                options,
+                title="  What would you like to do?",
+                menu_cursor_style=("fg_cyan", "bold"),
+                menu_highlight_style=("bg_gray", "fg_black"),
+            )
+            choice = menu.show()
+
+            if choice is None or choice == 2:  # quit or accept
+                break
+            elif choice == 0:  # keep current, skip unpicked
+                excluded.add(unpicked_film)
+                print(f"  → Skipping \"{unpicked_film}\"", file=sys.stderr)
+            elif choice == 1:  # keep unpicked, remove picked
+                excluded.add(blocking_film)
+                print(f"  → Removing \"{blocking_film}\", re-solving...", file=sys.stderr)
+                # Re-solve without the excluded films
+                filtered = {f: s for f, s in by_film.items() if f not in excluded}
+                picked = cp_sat_schedule(filtered, workers=workers)
+
+        return picked
+
+    finally:
+        if tty_fd is not None:
+            os.close(tty_fd)
 
 
 # ───────────────────────── output ─────────────────────────
@@ -261,6 +378,8 @@ def main():
                     help=f"minutes between screenings (default {BUFFER_MIN})")
     ap.add_argument("--workers", type=int, default=1,
                     help="CP-SAT search workers (default 1 — usually plenty)")
+    ap.add_argument("--interactive", "-i", action="store_true",
+                    help="interactive TUI to resolve conflicts when not all films fit")
     ap.add_argument("--ics", metavar="PATH",
                     help="also write the schedule as an ICS calendar file to PATH "
                          "(requires --schedule)")
@@ -311,6 +430,15 @@ def main():
         else:
             print(f"✗ No full schedule possible. "
                   f"Optimal max-fit: {len(picked)} of {len(names)} films.", file=sys.stderr)
+
+            # Interactive conflict resolution
+            if args.interactive:
+                if not HAVE_TUI:
+                    print("⚠  --interactive requires 'simple-term-menu'. "
+                          "Install with: pip install simple-term-menu", file=sys.stderr)
+                else:
+                    picked = interactive_resolve(by_film, picked, names, workers=args.workers)
+                    print(f"\n✓ Final schedule: {len(picked)} films.", file=sys.stderr)
 
         print_schedule(picked, names)
 

@@ -8,8 +8,9 @@ Single-file script `scrape_screenings.py` divided into clearly labelled sections
 
 1. **Parsing** — `parse(html)` over BeautifulSoup. Extracts film title from `<h1>`, duration from `<h2>` (regex on `Länge: X min.`), and per-screening date/time/venue/comment/ICS-URL from `.eventdate li` blocks.
 2. **Scheduling** — `cp_sat_schedule()` using Google OR-Tools CP-SAT solver. Operates on a `{film_name: [screening_dict, ...]}` mapping.
-3. **ICS output** — `write_ics(picked, path)` emits RFC 5545. Helpers `ics_escape()` and `ics_fold()` handle the format's quirks.
-4. **`main()`** — argparse, scrape loop, dispatch to scheduler, emit table/schedule/ICS.
+3. **Interactive TUI** — `interactive_resolve()` using `simple-term-menu`. When `--interactive` is set and not all films fit, presents binary choices to let the user decide which films to keep.
+4. **ICS output** — `write_ics(picked, path)` emits RFC 5545. Helpers `ics_escape()` and `ics_fold()` handle the format's quirks.
+5. **`main()`** — argparse, scrape loop, dispatch to scheduler, optional TUI, emit table/schedule/ICS.
 
 ## Key constraints (don't relearn these)
 
@@ -18,6 +19,7 @@ Single-file script `scrape_screenings.py` divided into clearly labelled sections
 - **Festival times are Munich local (Europe/Berlin).** ICS output converts to UTC. Don't change this without checking what calendar apps do with floating times.
 - **CP-SAT is the only solver** and `ortools` is a hard dependency. It solves 30-film instances in ~20 ms. Do not replace with pure-Python alternatives — they would be orders of magnitude slower.
 - **Stable ICS UIDs** are derived from the festival's `/ics/view/<N>` endpoint ID. Re-importing the calendar after a re-run shouldn't duplicate events. Don't generate UIDs from `uuid4()` or timestamps.
+- **TUI handles piped stdin** by reopening `/dev/tty`. This lets `cat urls.txt | ./script.py --interactive` work. Don't remove this — the menu needs a real terminal.
 
 ## Conventions
 
@@ -53,6 +55,6 @@ There are no automated tests. Verification has been done interactively against a
 ## Files
 
 - `scrape_screenings.py` — the script
-- `requirements.txt` — `requests`, `beautifulsoup4`, `ortools`
+- `requirements.txt` — `requests`, `beautifulsoup4`, `ortools`, `simple-term-menu`
 - `Dockerfile` — Debian-slim Python 3.13, with `libstdc++6` + `libgomp1` apt-installed for ortools
 - `README.md` — user-facing docs
