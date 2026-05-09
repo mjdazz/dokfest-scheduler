@@ -1,104 +1,33 @@
 # dokfest-scheduler
 
-Scrape film screenings from [DOK.fest München](https://www.dokfest-muenchen.de/) film pages, build a conflict-free personal viewing schedule, and export it as an ICS calendar file.
-
-## What it does
-
-Given a list of film page URLs (e.g. `https://www.dokfest-muenchen.de/films/intelligence-rising`), the script:
-
-1. Fetches each page, deduplicates the screening list (which appears in both sidebar and main column on the festival site), and emits a markdown table of all screenings — film title, date, time, venue, duration, festival ICS link, and any Q&A note.
-2. Optionally builds a **personal viewing schedule**: picks one screening per film such that no two picked screenings overlap (with a configurable buffer for travel time).
-3. Optionally writes an **ICS calendar file** of that schedule for import into Google Calendar, Apple Calendar, Outlook, etc.
-
-If a conflict-free schedule covering every film isn't possible, the script falls back to picking the largest subset that fits and lists the films that had to be dropped. With `--interactive`, you can resolve conflicts manually via a terminal menu.
-
-## Quick start (Docker — recommended)
-
-The Docker path avoids native-library issues (notably on NixOS, where pre-built numpy/ortools wheels fail to load `libstdc++.so.6`).
-
-```bash
-docker build -t dokfest .
-
-# urls.txt: one film page URL per line
-cat urls.txt | docker run --rm -i -v "$PWD:/out" dokfest \
-    --schedule --ics /out/schedule.ics > schedule.md
-
-# Interactive mode (resolve conflicts manually via TUI)
-docker run --rm -it -v "$PWD:/out" dokfest \
-    --schedule --interactive --ics /out/schedule.ics $(cat urls.txt) > schedule.md
-```
-
-The `-v "$PWD:/out"` mount is what lets the container's `/out/schedule.ics` land as `./schedule.ics` on the host. Interactive mode passes URLs as arguments (not piped) so the terminal stays available for the menu.
-
-## Local install (no Docker)
-
-```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-./scrape_screenings.py --schedule --ics schedule.ics < urls.txt > schedule.md
-```
-
-The `ortools` package is required for scheduling. If it fails to install on your machine (common on NixOS), use the Docker path instead.
+Build a personal viewing schedule for [DOK.fest München](https://www.dokfest-muenchen.de/).
 
 ## Usage
 
-```
-scrape_screenings.py [--schedule] [--ics PATH] [--no-table] [--interactive]
-                     [--buffer MINUTES] [--workers N] [URL ...]
+```bash
+docker build -t dokfest .
+docker run --rm -it -v "$PWD:/data" dokfest filme.txt
 ```
 
-URLs come from positional args **or** stdin, one per line. Stdin form is preferred for 20–30 films.
+This reads film URLs from `filme.txt` (one per line), scrapes screening times, and writes:
+- `filme.md` — markdown table of all screenings + your personal schedule
+- `filme.ics` — calendar file for import into Google Calendar / Apple Calendar / Outlook
+
+If not all films fit due to time conflicts, a menu lets you choose which films to keep.
+
+## Options
 
 | Flag | Effect |
 |---|---|
-| `--schedule` | also build a personal viewing schedule |
-| `--ics PATH` | write schedule as ICS calendar (requires `--schedule`) |
-| `--no-table` | skip the markdown table; useful with `--schedule --ics` |
-| `--buffer N` | minutes between screenings (default 15) — covers travel + entry |
-| `--interactive`, `-i` | TUI to resolve conflicts when not all films fit |
-| `--workers N` | CP-SAT search workers (default 1; rarely needed) |
+| `--buffer N` | minutes between screenings (default 15) |
 
-### Examples
+Example with 30-minute buffer:
 
 ```bash
-# Just the markdown table
-./scrape_screenings.py < urls.txt > screenings.md
-
-# Schedule + ICS, with a 30-min buffer (you cycle slowly)
-./scrape_screenings.py --schedule --buffer 30 --ics schedule.ics < urls.txt > schedule.md
-
-# Only the schedule, no table (good for piping)
-./scrape_screenings.py --schedule --no-table --ics schedule.ics < urls.txt
-
-# Interactive mode: resolve conflicts manually when films don't fit
-./scrape_screenings.py --schedule --interactive < urls.txt > schedule.md
+docker run --rm -it -v "$PWD:/data" dokfest filme.txt --buffer 30
 ```
-
-## Output formats
-
-- **Markdown table** (stdout): one row per screening, sorted by film. Columns: Film, Date, Time, Venue, Duration, ICS, Comment.
-- **Schedule** (stdout, with `--schedule`): chronological, grouped by date. Films that couldn't be scheduled are listed at the end.
-- **ICS file** (`--ics PATH`): RFC 5545 compliant. Times in UTC (converted from Munich local). Each event has SUMMARY (title), LOCATION (venue), DTSTART/DTEND, and DESCRIPTION (length + comment + festival source URL). UIDs derived from the festival's own ICS endpoint IDs, so re-importing won't duplicate events.
-
-## Performance
-
-The scheduling problem is "pick one screening per film, no time conflicts" — equivalent to a constrained max-coverage problem. CP-SAT solves 30-film instances in ~20 ms. Increasing `--workers` rarely helps at this problem size — orchestration overhead dominates the gains.
 
 ## Troubleshooting
 
-- **`ImportError: libstdc++.so.6: cannot open shared object file`** (typical on NixOS): pip-installed numpy/ortools wheels expect FHS library paths. Use Docker, or set `LD_LIBRARY_PATH=/path/to/gcc-libs/lib` (e.g. via a `shell.nix`).
-- **`ModuleNotFoundError: No module named 'ortools'`**: install with `pip install ortools`, or use the Docker path.
-- **403 from the festival site**: the script sets a Chrome-on-Linux User-Agent. The default Python `requests` UA is rejected.
-- **Schedule drops films you wanted**: increase candidate screenings (more film URLs), reduce `--buffer`, use `--interactive` to choose manually, or accept the dropped films — the solver returns the *optimal* maximum-coverage schedule, so dropped films genuinely don't fit.
-- **`--interactive` not working in Docker**: you can't pipe stdin and have a TTY simultaneously. Pass URLs as arguments instead:
-  ```bash
-  docker run --rm -it -v "$PWD:/out" dokfest \
-      --schedule --interactive --ics /out/schedule.ics $(cat urls.txt)
-  ```
-
-## Files
-
-- `scrape_screenings.py` — single-file script (parsing, scheduling, TUI, ICS output, CLI)
-- `requirements.txt` — `requests`, `beautifulsoup4`, `ortools`, `simple-term-menu`
-- `Dockerfile` — Debian-slim Python 3.13 base + libstdc++/libgomp + pip deps
-- `CLAUDE.md` — context for Claude Code sessions
+- **403 from the festival site** — the script sets a browser User-Agent, but the site may still block some IPs
+- **Menu not appearing** — make sure you're using `-it` flags for interactive mode
